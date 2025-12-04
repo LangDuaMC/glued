@@ -10,7 +10,10 @@ pub struct Config {
     pub network_name: String,
     pub topic_id: String,
     pub bootstrap_peers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bind_ip: Option<String>,
     pub dns_bind: SocketAddr,
+    pub cluster_secret: String,
 }
 
 impl Default for Config {
@@ -20,18 +23,30 @@ impl Default for Config {
             // Default topic: 32 bytes of 0x42 encoded as hex
             topic_id: "4242424242424242424242424242424242424242424242424242424242424242".into(),
             bootstrap_peers: Vec::new(),
-            dns_bind: "0.0.0.0:5353".parse().unwrap(),
+            bind_ip: None,
+            dns_bind: "0.0.0.0:53".parse().unwrap(),
+            cluster_secret: "default_insecure_secret".into(),
         }
     }
 }
 
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
-        Figment::from(Serialized::defaults(Config::default()))
+        let mut config: Config = Figment::from(Serialized::defaults(Config::default()))
             .merge(Toml::file("glued.toml"))
             .merge(Json::file("glued.json"))
             .merge(Env::prefixed("GLUED_"))
             .extract()
-            .map_err(|e| anyhow::anyhow!("Failed to load configuration: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to load configuration: {}", e))?;
+
+        // If bind_ip is set, override the IP part of dns_bind
+        if let Some(ref ip) = config.bind_ip {
+            let port = config.dns_bind.port();
+            config.dns_bind = format!("{}:{}", ip, port)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid bind_ip: {}", e))?;
+        }
+
+        Ok(config)
     }
 }

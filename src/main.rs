@@ -46,8 +46,17 @@ async fn main() -> anyhow::Result<()> {
     let state_for_gossip = Arc::clone(&state);
     let topic_id = cfg.topic_id.clone();
     let bootstrap_peers = cfg.bootstrap_peers.clone();
+    let cluster_secret = cfg.cluster_secret.clone();
     let gossip_handle = tokio::spawn(async move {
-        if let Err(e) = run_gossip(topic_id, bootstrap_peers, update_rx, state_for_gossip).await {
+        if let Err(e) = run_gossip(
+            topic_id,
+            bootstrap_peers,
+            update_rx,
+            state_for_gossip,
+            cluster_secret,
+        )
+        .await
+        {
             error!("Gossip subsystem failed: {}", e);
         }
     });

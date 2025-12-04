@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  node1:
+    build: .
+    container_name: glued-node1
+    network_mode: host
+    environment:
+      GLUED_CLUSTER_SECRET: "my_secure_cluster_secret"
+      GLUED_NETWORK_NAME: "glued_net"
+      GLUED_TOPIC_ID: "4242424242424242424242424242424242424242424242424242424242424242"
+      # Fast IP configuration - just set the IP, port defaults to 53
+      # GLUED_BIND_IP: "192.168.1.10"
+      # Or use full address:
+      # GLUED_DNS_BIND: "0.0.0.0:53"
+      # Bootstrap peers: Add node IDs of other nodes after first run
+      # GLUED_BOOTSTRAP_PEERS: "node2_id,node3_id"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  node2:
+    build: .
+    container_name: glued-node2
+    network_mode: host
+    environment:
+      GLUED_CLUSTER_SECRET: "my_secure_cluster_secret"
+      GLUED_NETWORK_NAME: "glued_net"
+      GLUED_TOPIC_ID: "4242424242424242424242424242424242424242424242424242424242424242"
+      # GLUED_BIND_IP: "192.168.1.11"
+      # GLUED_BOOTSTRAP_PEERS: "node1_id,node3_id"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  node3:
+    build: .
+    container_name: glued-node3
+    network_mode: host
+    environment:
+      GLUED_CLUSTER_SECRET: "my_secure_cluster_secret"
+      GLUED_NETWORK_NAME: "glued_net"
+      GLUED_TOPIC_ID: "4242424242424242424242424242424242424242424242424242424242424242"
+      # GLUED_BIND_IP: "192.168.1.12"
+      # GLUED_BOOTSTRAP_PEERS: "node1_id,node2_id"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
