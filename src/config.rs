@@ -7,7 +7,8 @@ use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub network_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_name: Option<String>,
     pub topic_id: String,
     pub bootstrap_peers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -19,7 +20,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            network_name: "glued_net".into(),
+            network_name: None,
             // Default topic: 32 bytes of 0x42 encoded as hex
             topic_id: "4242424242424242424242424242424242424242424242424242424242424242".into(),
             bootstrap_peers: Vec::new(),
@@ -38,6 +39,13 @@ impl Config {
             .merge(Env::prefixed("GLUED_"))
             .extract()
             .map_err(|e| anyhow::anyhow!("Failed to load configuration: {}", e))?;
+
+        // Support Docker-style secrets
+        if let Ok(secret_file) = std::env::var("GLUED_CLUSTER_SECRET_FILE") {
+            config.cluster_secret = std::fs::read_to_string(secret_file)?
+                .trim()
+                .to_string();
+        }
 
         // If bind_ip is set, override the IP part of dns_bind
         if let Some(ref ip) = config.bind_ip {

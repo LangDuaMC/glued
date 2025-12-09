@@ -1,0 +1,58 @@
+# To deploy this stack:
+# 1. Create a Docker secret for the cluster:
+#    echo "a_very_secure_and_random_secret_phrase" | docker secret create glued_cluster_secret -
+#
+# 2. Create the overlay network with a defined subnet for static IP assignment:
+#    docker network create --driver overlay --subnet=172.16.238.0/24 glued_net
+#
+# 3. Deploy the stack:
+#    docker stack deploy -c docker-compose.prod.yml glued
+version: '3.8'
+
+services:
+  main:
+    image: ghcr.io/stdpi/glued:latest
+    networks:
+      glued_net:
+        ipv4_address: 172.16.238.254 # Static IP for the main service
+    ports:
+      - "53:53/udp"
+    environment:
+      GLUED_ROLE: "main"
+      GLUED_CLUSTER_SECRET_FILE: /run/secrets/glued_cluster_secret
+      GLUED_NETWORK_NAME: "glued_net"
+      GLUED_TOPIC_ID: "4c6667aa6181e9fdd91a6b81e8310a25644e7e1eb26c7521f07dc0f8b8537c4c"
+      GLUED_DNS_BIND: "0.0.0.0:53"
+    secrets:
+      - glued_cluster_secret
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  replica:
+    image: ghcr.io/stdpi/glued:latest
+    networks:
+      - glued_net
+    environment:
+      GLUED_ROLE: "replica"
+      GLUED_CLUSTER_SECRET_FILE: /run/secrets/glued_cluster_secret
+      GLUED_NETWORK_NAME: "glued_net"
+      GLUED_TOPIC_ID: "4c6667aa6181e9fdd91a6b81e8310a25644e7e1eb26c7521f07dc0f8b8537c4c"
+      GLUED_DNS_BIND: "0.0.0.0:53"
+      # Replicas discover the main service via Docker DNS to bootstrap
+      GLUED_BOOTSTRAP_SERVICE: "main"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    secrets:
+      - glued_cluster_secret
+    restart: unless-stopped
+    deploy:
+      mode: global # Ensures one replica runs on each available node
+
+networks:
+  glued_net:
+    external: true
+
+secrets:
+  glued_cluster_secret:
+    external: true

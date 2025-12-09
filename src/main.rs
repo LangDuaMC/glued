@@ -25,7 +25,49 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     // Load configuration
-    let cfg = Config::load()?;
+    let mut cfg = Config::load()?;
+
+    // If a network name is provided, act as a replica (watch containers and gossip);
+    // otherwise run in DNS-only mode.
+    let is_replica = cfg.network_name.is_some();
+    let role = if is_replica { "replica" } else { "dns-only" };
+    info!("Running as {} role", role);
+
+    // Replica-specific logic
+    if is_replica {
+        // Infer peers from Docker DNS if a bootstrap service name is provided
+        if let Ok(service_name) = std::env::var("GLUED_BOOTSTRAP_SERVICE") {
+            info!("Attempting to discover bootstrap peers for service '{}' via DNS.", service_name);
+            // Use hickory-resolver (previously trust-dns-resolver)
+            use hickory_resolver::TokioAsyncResolver;
+            use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+
+            // Create a resolver with default configuration
+            let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+            
+            // The hostname for a Docker Swarm service's tasks is `tasks.<service_name>`
+            let lookup_name = format!("tasks.{}", service_name);
+            
+            match resolver.lookup_ip(lookup_name.clone()).await {
+                Ok(response) => {
+                    let discovered_peers: Vec<String> = response.iter().map(|ip| ip.to_string()).collect();
+                    if discovered_peers.is_empty() {
+                        info!("DNS lookup for '{}' was successful but returned no IPs.", lookup_name);
+                    } else {
+                        info!("Discovered bootstrap peers: {:?}", discovered_peers);
+                        cfg.bootstrap_peers.extend(discovered_peers);
+                        // Remove duplicates
+                        cfg.bootstrap_peers.sort();
+                        cfg.bootstrap_peers.dedup();
+                    }
+                }
+                Err(e) => {
+                    error!("DNS lookup for '{}' failed: {}. Continuing with configured peers.", lookup_name, e);
+                }
+            }
+        }
+    }
+
     info!("Starting Glued daemon with config: {:?}", cfg);
 
     // Shared state
@@ -34,13 +76,19 @@ async fn main() -> anyhow::Result<()> {
     // Update channel
     let (update_tx, update_rx) = mpsc::channel(128);
 
-    // Container Runtime (Docker)
-    let runtime = DockerRuntime::new(cfg.network_name.clone());
-    let runtime_handle = tokio::spawn(async move {
-        if let Err(e) = runtime.monitor(update_tx).await {
-            error!("Container runtime failed: {}", e);
-        }
-    });
+    // Conditionally start the Container Runtime monitor for replicas
+    let runtime_handle = if is_replica {
+        info!("Starting container runtime monitor...");
+        let runtime = DockerRuntime::new(cfg.network_name.clone());
+        let handle = tokio::spawn(async move {
+            if let Err(e) = runtime.monitor(update_tx).await {
+                error!("Container runtime failed: {}", e);
+            }
+        });
+        Some(handle)
+    } else {
+        None
+    };
 
     // Gossip Subsystem
     let state_for_gossip = Arc::clone(&state);
@@ -81,7 +129,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Abort tasks
-    runtime_handle.abort();
+    if let Some(handle) = runtime_handle {
+        handle.abort();
+    }
     gossip_handle.abort();
     dns_handle.abort();
 

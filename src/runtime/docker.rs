@@ -1,6 +1,6 @@
 use super::ContainerRuntime;
 use crate::types::Update;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bollard::container::ListContainersOptions;
 use bollard::system::EventsOptions;
@@ -8,16 +8,17 @@ use bollard::Docker;
 use futures_util::stream::StreamExt;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
+use std::env;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 pub struct DockerRuntime {
-    network_name: String,
+    network_name: Option<String>,
 }
 
 impl DockerRuntime {
-    pub fn new(network_name: String) -> Self {
+    pub fn new(network_name: Option<String>) -> Self {
         Self { network_name }
     }
 
@@ -25,6 +26,34 @@ impl DockerRuntime {
         // Connect to the local Docker daemon using default settings.
         // This handles unix socket on Linux.
         Docker::connect_with_local_defaults().map_err(Into::into)
+    }
+
+    /// Inspects the current container to find the first attached overlay network.
+    /// This is used by replicas to auto-discover the network to monitor.
+    async fn autodetect_overlay_network(docker: &Docker) -> Result<String> {
+        info!("`NETWORK_NAME` not specified, attempting to auto-detect overlay network...");
+        // In a Docker container, the hostname is typically the container ID.
+        let hostname = env::var("HOSTNAME")?;
+        let container_detail = docker.inspect_container(&hostname, None).await?;
+
+        if let Some(networks) = container_detail
+            .network_settings
+            .and_then(|s| s.networks)
+        {
+            for (name, _) in networks {
+                let network_detail = docker.inspect_network(&name, None::<String>).await?;
+                if let Some(driver) = network_detail.driver {
+                    if driver == "overlay" {
+                        info!("Auto-detected overlay network: {}", name);
+                        return Ok(name);
+                    }
+                }
+            }
+        }
+
+        Err(anyhow!(
+            "Could not auto-detect an overlay network for this container."
+        ))
     }
 
     async fn get_initial_state(
@@ -64,8 +93,6 @@ impl DockerRuntime {
 #[async_trait]
 impl ContainerRuntime for DockerRuntime {
     async fn monitor(&self, update_tx: mpsc::Sender<Update>) -> Result<()> {
-        info!("Starting Docker monitor for network: {}", self.network_name);
-
         loop {
             let docker = match Self::connect().await {
                 Ok(d) => d,
@@ -76,8 +103,25 @@ impl ContainerRuntime for DockerRuntime {
                 }
             };
 
+            // Auto-detect network if not provided
+            let network_name = match &self.network_name {
+                Some(name) => name.clone(),
+                None => match Self::autodetect_overlay_network(&docker).await {
+                    Ok(name) => name,
+                    Err(e) => {
+                        error!(
+                            "Network discovery failed: {}. Retrying in 10s...",
+                            e
+                        );
+                        sleep(Duration::from_secs(10)).await;
+                        continue;
+                    }
+                },
+            };
+            info!("Starting Docker monitor for network: {}", network_name);
+
             // Initial scan
-            match Self::get_initial_state(&docker, &self.network_name).await {
+            match Self::get_initial_state(&docker, &network_name).await {
                 Ok(initial_map) => {
                     info!("Initial scan found {} containers", initial_map.len());
                     for (name, ip) in initial_map {
@@ -139,7 +183,7 @@ impl ContainerRuntime for DockerRuntime {
                                         {
                                             Ok(detail) => {
                                                 if let Some(ip) =
-                                                    get_ip_for_network(&detail, &self.network_name)
+                                                    get_ip_for_network(&detail, &network_name)
                                                 {
                                                     info!(
                                                         "Container started: {} -> {}",

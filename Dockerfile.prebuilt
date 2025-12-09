@@ -1,0 +1,21 @@
+# Runner stage for pre-built binary
+# Use a glibc-based image to match the Ubuntu-built binary from CI.
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy binary from the build context (which will be the pre-built binary from GitHub Actions)
+COPY glued /app/glued
+
+# Expose ports
+# DNS (standard port)
+EXPOSE 53/udp
+# Gossip (Iroh) - uses random ports, host networking recommended for p2p
+
+# Entrypoint
+ENTRYPOINT ["/app/glued"]
