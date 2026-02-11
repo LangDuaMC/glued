@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   node1:
-    build: .
+    image: ghcr.io/langduamc/glued:latest
     container_name: glued-node1
     network_mode: host
     environment:
@@ -20,7 +20,7 @@ services:
     restart: unless-stopped
 
   node2:
-    build: .
+    image: ghcr.io/langduamc/glued:latest
     container_name: glued-node2
     network_mode: host
     environment:
@@ -34,7 +34,7 @@ services:
     restart: unless-stopped
 
   node3:
-    build: .
+    image: ghcr.io/langduamc/glued:latest
     container_name: glued-node3
     network_mode: host
     environment:

@@ -16,8 +16,8 @@ use crate::types::Update;
 pub async fn run_gossip(
     topic_id: String,
     bootstrap_peers: Vec<String>,
-    mut update_rx: mpsc::Receiver<Update>,
-    _state: Arc<RwLock<HashMap<String, String>>>,
+    mut outbound_rx: mpsc::Receiver<Update>,
+    inbound_tx: mpsc::Sender<Update>,
     cluster_secret: String,
 ) -> anyhow::Result<()> {
     // Create a new Iroh endpoint.
@@ -116,8 +116,8 @@ pub async fn run_gossip(
 
     // Main loop: read local updates and broadcast
     // TODO: Integrate with gossip once API is stable
-    while let Some(update) = update_rx.recv().await {
-        let _bytes = match serde_json::to_vec(&update) {
+    while let Some(update) = outbound_rx.recv().await {
+        let serialized = match serde_json::to_vec(&update) {
             Ok(b) => b,
             Err(e) => {
                 error!("Failed to serialize update: {}", e);
@@ -128,7 +128,12 @@ pub async fn run_gossip(
             "Broadcasting update (pending gossip integration): {:?}",
             update
         );
+        // Forward to inbound channel so registries also learn about their own broadcasts.
+        if let Err(e) = inbound_tx.send(update).await {
+            warn!("Failed to forward broadcasted update to registry: {}", e);
+        }
         // TODO: Use gossip to broadcast once API is available
+        let _ = serialized;
     }
     info!("Gossip update channel closed, shutting down");
     Ok(())
@@ -206,8 +211,7 @@ async fn perform_auth_handshake(
     Ok(())
 }
 
-#[allow(dead_code)]
-async fn apply_update(update: Update, state: &Arc<RwLock<HashMap<String, String>>>) {
+pub async fn apply_update(update: Update, state: &Arc<RwLock<HashMap<String, String>>>) {
     match update {
         Update::Add { name, ip } => {
             let mut map = state.write().await;

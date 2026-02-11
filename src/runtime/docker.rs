@@ -8,17 +8,16 @@ use bollard::Docker;
 use futures_util::stream::StreamExt;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
-use std::env;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 pub struct DockerRuntime {
-    network_name: Option<String>,
+    network_name: String,
 }
 
 impl DockerRuntime {
-    pub fn new(network_name: Option<String>) -> Self {
+    pub fn new(network_name: String) -> Self {
         Self { network_name }
     }
 
@@ -26,34 +25,6 @@ impl DockerRuntime {
         // Connect to the local Docker daemon using default settings.
         // This handles unix socket on Linux.
         Docker::connect_with_local_defaults().map_err(Into::into)
-    }
-
-    /// Inspects the current container to find the first attached overlay network.
-    /// This is used by replicas to auto-discover the network to monitor.
-    async fn autodetect_overlay_network(docker: &Docker) -> Result<String> {
-        info!("`NETWORK_NAME` not specified, attempting to auto-detect overlay network...");
-        // In a Docker container, the hostname is typically the container ID.
-        let hostname = env::var("HOSTNAME")?;
-        let container_detail = docker.inspect_container(&hostname, None).await?;
-
-        if let Some(networks) = container_detail
-            .network_settings
-            .and_then(|s| s.networks)
-        {
-            for (name, _) in networks {
-                let network_detail = docker.inspect_network(&name, None::<String>).await?;
-                if let Some(driver) = network_detail.driver {
-                    if driver == "overlay" {
-                        info!("Auto-detected overlay network: {}", name);
-                        return Ok(name);
-                    }
-                }
-            }
-        }
-
-        Err(anyhow!(
-            "Could not auto-detect an overlay network for this container."
-        ))
     }
 
     async fn get_initial_state(
@@ -88,6 +59,36 @@ impl DockerRuntime {
         }
         Ok(map)
     }
+
+    async fn ensure_target_network(docker: &Docker, network_name: &str) -> Result<()> {
+        match docker
+            .inspect_network(network_name, None::<bollard::network::InspectNetworkOptions<String>>)
+            .await
+        {
+            Ok(details) => {
+                let driver = details
+                    .driver
+                    .unwrap_or_else(|| "unknown driver".to_string());
+                let id = details.id.unwrap_or_else(|| "unknown-id".to_string());
+                info!(
+                    "Monitoring docker network '{}' ({}, driver {})",
+                    network_name, id, driver
+                );
+                if driver != "overlay" {
+                    warn!(
+                        "Network '{}' is using driver '{}'; replicas expect an overlay network.",
+                        network_name, driver
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => Err(anyhow!(
+                "Network '{}' could not be inspected: {}",
+                network_name,
+                e
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -102,22 +103,13 @@ impl ContainerRuntime for DockerRuntime {
                     continue;
                 }
             };
+            let network_name = self.network_name.clone();
 
-            // Auto-detect network if not provided
-            let network_name = match &self.network_name {
-                Some(name) => name.clone(),
-                None => match Self::autodetect_overlay_network(&docker).await {
-                    Ok(name) => name,
-                    Err(e) => {
-                        error!(
-                            "Network discovery failed: {}. Retrying in 10s...",
-                            e
-                        );
-                        sleep(Duration::from_secs(10)).await;
-                        continue;
-                    }
-                },
-            };
+            if let Err(e) = Self::ensure_target_network(&docker, &network_name).await {
+                error!("{}", e);
+                sleep(Duration::from_secs(10)).await;
+                continue;
+            }
             info!("Starting Docker monitor for network: {}", network_name);
 
             // Initial scan

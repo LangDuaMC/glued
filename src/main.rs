@@ -19,6 +19,12 @@ use gossip::run_gossip;
 use runtime::{ContainerRuntime, DockerRuntime};
 // use types::Update;
 
+#[derive(Debug, Clone)]
+enum Role {
+    Main,
+    Replica(String),
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize logging
@@ -28,41 +34,61 @@ async fn main() -> anyhow::Result<()> {
     let mut cfg = Config::load()?;
 
     // If a network name is provided, act as a replica (watch containers and gossip);
-    // otherwise run in DNS-only mode.
-    let is_replica = cfg.network_name.is_some();
-    let role = if is_replica { "replica" } else { "dns-only" };
-    info!("Running as {} role", role);
+    // otherwise run as the main instance (DNS + registry only).
+    let role = match cfg.network_name.clone() {
+        Some(network) => Role::Replica(network),
+        None => Role::Main,
+    };
+    let role_label = match &role {
+        Role::Main => "main",
+        Role::Replica(_) => "replica",
+    };
+    info!("Running as {} role", role_label);
 
     // Replica-specific logic
-    if is_replica {
+    if let Role::Replica(_) = role {
         // Infer peers from Docker DNS if a bootstrap service name is provided
-        if let Ok(service_name) = std::env::var("GLUED_BOOTSTRAP_SERVICE") {
-            info!("Attempting to discover bootstrap peers for service '{}' via DNS.", service_name);
+        if let Some(service_name) = cfg.bootstrap_service.clone() {
+            info!(
+                "Attempting to discover bootstrap peers for service '{}' via Docker DNS.",
+                service_name
+            );
             // Use hickory-resolver (previously trust-dns-resolver)
-            use hickory_resolver::TokioAsyncResolver;
             use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+            use hickory_resolver::TokioAsyncResolver;
 
             // Create a resolver with default configuration
-            let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
-            
+            let resolver =
+                TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+
             // The hostname for a Docker Swarm service's tasks is `tasks.<service_name>`
             let lookup_name = format!("tasks.{}", service_name);
-            
+
             match resolver.lookup_ip(lookup_name.clone()).await {
                 Ok(response) => {
-                    let discovered_peers: Vec<String> = response.iter().map(|ip| ip.to_string()).collect();
+                    let discovered_peers: Vec<String> =
+                        response.iter().map(|ip| ip.to_string()).collect();
                     if discovered_peers.is_empty() {
-                        info!("DNS lookup for '{}' was successful but returned no IPs.", lookup_name);
+                        info!(
+                            "DNS lookup for '{}' was successful but returned no IPs.",
+                            lookup_name
+                        );
                     } else {
                         info!("Discovered bootstrap peers: {:?}", discovered_peers);
-                        cfg.bootstrap_peers.extend(discovered_peers);
+                        // Prioritise the main instance by inserting discovered peers first.
+                        let mut ordered = discovered_peers;
+                        ordered.extend(cfg.bootstrap_peers.clone());
+                        cfg.bootstrap_peers = ordered;
                         // Remove duplicates
                         cfg.bootstrap_peers.sort();
                         cfg.bootstrap_peers.dedup();
                     }
                 }
                 Err(e) => {
-                    error!("DNS lookup for '{}' failed: {}. Continuing with configured peers.", lookup_name, e);
+                    error!(
+                        "DNS lookup for '{}' failed: {}. Continuing with configured peers.",
+                        lookup_name, e
+                    );
                 }
             }
         }
@@ -73,15 +99,17 @@ async fn main() -> anyhow::Result<()> {
     // Shared state
     let state: Arc<RwLock<HashMap<String, String>>> = Arc::new(RwLock::new(HashMap::new()));
 
-    // Update channel
-    let (update_tx, update_rx) = mpsc::channel(128);
+    // Update channels
+    let (local_update_tx, local_update_rx) = mpsc::channel(128);
+    let (gossip_out_tx, gossip_out_rx) = mpsc::channel(128);
+    let (gossip_in_tx, gossip_in_rx) = mpsc::channel(128);
 
     // Conditionally start the Container Runtime monitor for replicas
-    let runtime_handle = if is_replica {
+    let runtime_handle = if let Role::Replica(network_name) = role.clone() {
         info!("Starting container runtime monitor...");
-        let runtime = DockerRuntime::new(cfg.network_name.clone());
+        let runtime = DockerRuntime::new(network_name);
         let handle = tokio::spawn(async move {
-            if let Err(e) = runtime.monitor(update_tx).await {
+            if let Err(e) = runtime.monitor(local_update_tx).await {
                 error!("Container runtime failed: {}", e);
             }
         });
@@ -90,8 +118,30 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Local registry updater: apply local discoveries and forward to gossip.
+    let registry_for_local = Arc::clone(&state);
+    let gossip_out_forward = gossip_out_tx.clone();
+    let registry_local_handle = tokio::spawn(async move {
+        let mut updates = local_update_rx;
+        while let Some(update) = updates.recv().await {
+            gossip::apply_update(update.clone(), &registry_for_local).await;
+            if let Err(e) = gossip_out_forward.send(update).await {
+                error!("Failed to forward update to gossip pipeline: {}", e);
+                break;
+            }
+        }
+    });
+
+    // Remote registry updater: apply gossip results into local registry.
+    let registry_for_remote = Arc::clone(&state);
+    let registry_remote_handle = tokio::spawn(async move {
+        let mut updates = gossip_in_rx;
+        while let Some(update) = updates.recv().await {
+            gossip::apply_update(update, &registry_for_remote).await;
+        }
+    });
+
     // Gossip Subsystem
-    let state_for_gossip = Arc::clone(&state);
     let topic_id = cfg.topic_id.clone();
     let bootstrap_peers = cfg.bootstrap_peers.clone();
     let cluster_secret = cfg.cluster_secret.clone();
@@ -99,8 +149,8 @@ async fn main() -> anyhow::Result<()> {
         if let Err(e) = run_gossip(
             topic_id,
             bootstrap_peers,
-            update_rx,
-            state_for_gossip,
+            gossip_out_rx,
+            gossip_in_tx,
             cluster_secret,
         )
         .await
@@ -132,6 +182,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = runtime_handle {
         handle.abort();
     }
+    registry_local_handle.abort();
+    registry_remote_handle.abort();
     gossip_handle.abort();
     dns_handle.abort();
 

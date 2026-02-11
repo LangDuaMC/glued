@@ -11,16 +11,14 @@ version: '3.8'
 
 services:
   main:
-    image: ghcr.io/stdpi/glued:latest
+    image: ghcr.io/langduamc/glued:latest
     networks:
       glued_net:
         ipv4_address: 172.16.238.254 # Static IP for the main service
     ports:
       - "53:53/udp"
     environment:
-      GLUED_ROLE: "main"
       GLUED_CLUSTER_SECRET_FILE: /run/secrets/glued_cluster_secret
-      GLUED_NETWORK_NAME: "glued_net"
       GLUED_TOPIC_ID: "4c6667aa6181e9fdd91a6b81e8310a25644e7e1eb26c7521f07dc0f8b8537c4c"
       GLUED_DNS_BIND: "0.0.0.0:53"
     secrets:
@@ -28,13 +26,15 @@ services:
     restart: unless-stopped
     deploy:
       replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
 
   replica:
-    image: ghcr.io/stdpi/glued:latest
+    image: ghcr.io/langduamc/glued:latest
     networks:
       - glued_net
     environment:
-      GLUED_ROLE: "replica"
       GLUED_CLUSTER_SECRET_FILE: /run/secrets/glued_cluster_secret
       GLUED_NETWORK_NAME: "glued_net"
       GLUED_TOPIC_ID: "4c6667aa6181e9fdd91a6b81e8310a25644e7e1eb26c7521f07dc0f8b8537c4c"
