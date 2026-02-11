@@ -1,4 +1,5 @@
 name: Docker
+# NOTE: Keep this workflow file active to avoid disabled_inactivity.
 
 # This workflow uses actions that are not certified by GitHub.
 # They are provided by a third-party and are governed by
